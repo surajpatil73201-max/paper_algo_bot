@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 import sqlite3
@@ -8,17 +8,22 @@ import hashlib
 app = FastAPI()
 DB = "trades.db"
 
-# ================= SETTINGS =================
-MAX_TRADES_PER_DAY = 5
-MAX_DAILY_LOSS = -500
-DEFAULT_QTY = 1
+MAX_TRADES_PER_DAY = 20
+MAX_DAILY_LOSS = -2000
 
 class Signal(BaseModel):
     strategy_id: str = "A"
     symbol: str
     signal: str
     price: float
-    qty: int = DEFAULT_QTY
+
+    trade_type: str = "OPTION"
+    option_type: str = "CE"   # CE / PE
+    strike: float = 0
+    expiry: str = ""
+    lot_size: int = 75
+    lots: int = 1
+
     alert_id: str | None = None
 
 def conn():
@@ -34,7 +39,6 @@ def today():
 
 def init_db():
     c = conn()
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS trades(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,9 +46,15 @@ def init_db():
         trade_date TEXT,
         strategy_id TEXT,
         symbol TEXT,
+        trade_type TEXT,
+        option_type TEXT,
+        strike REAL,
+        expiry TEXT,
         side TEXT,
         entry REAL,
         exit REAL,
+        lot_size INTEGER,
+        lots INTEGER,
         qty INTEGER,
         status TEXT,
         pnl REAL,
@@ -69,7 +79,7 @@ init_db()
 @app.get("/")
 def home():
     return {
-        "status": "Paper Algo Software Running",
+        "status": "Option Paper Algo Running",
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
@@ -80,14 +90,15 @@ def webhook(s: Signal):
     symbol = s.symbol.upper()
     strategy = s.strategy_id.upper()
     price = float(s.price)
-    qty = int(s.qty)
+    trade_type = s.trade_type.upper()
+    option_type = s.option_type.upper()
+    qty = int(s.lot_size) * int(s.lots)
 
     raw = f"{strategy}-{symbol}-{signal}-{price}-{qty}-{s.alert_id}"
     alert_hash = hashlib.sha256(raw.encode()).hexdigest()
 
     c = conn()
 
-    # Duplicate alert block
     try:
         c.execute(
             "INSERT INTO alerts(alert_hash,time,raw) VALUES(?,?,?)",
@@ -98,7 +109,6 @@ def webhook(s: Signal):
         c.close()
         return {"status": "ignored", "reason": "Duplicate alert blocked"}
 
-    # Daily risk check
     closed_today = c.execute(
         "SELECT * FROM trades WHERE trade_date=? AND status='CLOSED'",
         (today(),)
@@ -121,25 +131,27 @@ def webhook(s: Signal):
         ORDER BY id DESC LIMIT 1
     """, (symbol, strategy)).fetchone()
 
-    # Entry
     if signal in ["BUY", "SELL"]:
         if open_trade:
             c.close()
             return {"status": "ignored", "reason": "Open trade already exists"}
 
         c.execute("""
-        INSERT INTO trades(time,trade_date,strategy_id,symbol,side,entry,exit,qty,status,pnl,exit_reason)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO trades(
+            time,trade_date,strategy_id,symbol,trade_type,option_type,
+            strike,expiry,side,entry,exit,lot_size,lots,qty,status,pnl,exit_reason
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            now(), today(), strategy, symbol, signal, price, None,
-            qty, "OPEN", 0, None
+            now(), today(), strategy, symbol, trade_type, option_type,
+            s.strike, s.expiry, signal, price, None,
+            s.lot_size, s.lots, qty, "OPEN", 0, None
         ))
 
         c.commit()
         c.close()
-        return {"status": "success", "message": f"{signal} opened", "price": price}
+        return {"status": "success", "message": f"{signal} option trade opened", "qty": qty}
 
-    # Exit
     if signal in ["EXIT", "CLOSE"]:
         if not open_trade:
             c.close()
@@ -229,9 +241,15 @@ def dashboard():
             <td>{t['time']}</td>
             <td>{t['strategy_id']}</td>
             <td>{t['symbol']}</td>
+            <td>{t['trade_type']}</td>
+            <td>{t['option_type']}</td>
+            <td>{t['strike']}</td>
+            <td>{t['expiry']}</td>
             <td>{t['side']}</td>
             <td>{t['entry']}</td>
             <td>{t['exit']}</td>
+            <td>{t['lot_size']}</td>
+            <td>{t['lots']}</td>
             <td>{t['qty']}</td>
             <td>{t['status']}</td>
             <td style="color:{pnl_color};font-weight:bold;">{round(t['pnl'],2)}</td>
@@ -243,23 +261,77 @@ def dashboard():
     return f"""
     <html>
     <head>
-        <title>Algo Paper Dashboard</title>
-        <meta http-equiv="refresh" content="5">
+        <title>Option Algo Paper Dashboard</title>
         <style>
-            body {{font-family:Arial;background:#f4f6f8;padding:20px;}}
-            h1 {{color:#111;}}
-            .cards {{display:flex;gap:15px;flex-wrap:wrap;}}
-            .card {{background:white;padding:18px;border-radius:10px;min-width:180px;box-shadow:0 2px 6px #ccc;}}
-            table {{width:100%;border-collapse:collapse;background:white;margin-top:20px;font-size:14px;}}
-            th,td {{padding:8px;border:1px solid #ddd;text-align:center;}}
-            th {{background:#111;color:white;}}
-            button {{padding:6px 10px;background:#111;color:white;border:none;border-radius:5px;}}
-            input {{width:90px;padding:5px;}}
-            .danger {{background:#c0392b;color:white;padding:10px;border-radius:6px;text-decoration:none;}}
+            body {{
+                font-family: Arial;
+                background:#f4f6f8;
+                padding:20px;
+            }}
+            h1 {{ color:#111; }}
+            .topbar {{
+                display:flex;
+                gap:10px;
+                margin-bottom:15px;
+            }}
+            .btn {{
+                padding:10px 15px;
+                background:#111;
+                color:white;
+                border-radius:6px;
+                text-decoration:none;
+            }}
+            .danger {{
+                background:#c0392b;
+            }}
+            .cards {{
+                display:flex;
+                gap:15px;
+                flex-wrap:wrap;
+            }}
+            .card {{
+                background:white;
+                padding:18px;
+                border-radius:10px;
+                min-width:170px;
+                box-shadow:0 2px 6px #ccc;
+            }}
+            table {{
+                width:100%;
+                border-collapse:collapse;
+                background:white;
+                margin-top:20px;
+                font-size:13px;
+            }}
+            th,td {{
+                padding:8px;
+                border:1px solid #ddd;
+                text-align:center;
+            }}
+            th {{
+                background:#111;
+                color:white;
+            }}
+            input {{
+                width:80px;
+                padding:5px;
+            }}
+            button {{
+                padding:6px 10px;
+                background:#111;
+                color:white;
+                border:none;
+                border-radius:5px;
+            }}
         </style>
     </head>
     <body>
-        <h1>Algo Paper Trading Dashboard</h1>
+        <h1>Option Algo Paper Dashboard</h1>
+
+        <div class="topbar">
+            <a class="btn" href="/dashboard">Manual Refresh</a>
+            <a class="btn danger" href="/reset">Reset All Trades</a>
+        </div>
 
         <div class="cards">
             <div class="card"><h3>Total P&L</h3><h2>{round(total_pnl,2)}</h2></div>
@@ -268,17 +340,14 @@ def dashboard():
             <div class="card"><h3>Closed Trades</h3><h2>{total_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
             <div class="card"><h3>Wins / Losses</h3><h2>{wins} / {losses}</h2></div>
-            <div class="card"><h3>Risk Limit</h3><h2>{MAX_DAILY_LOSS}</h2></div>
-            <div class="card"><h3>Max Trades/Day</h3><h2>{MAX_TRADES_PER_DAY}</h2></div>
         </div>
-
-        <br>
-        <a class="danger" href="/reset">Reset All Trades</a>
 
         <table>
             <tr>
                 <th>ID</th><th>Time</th><th>Strategy</th><th>Symbol</th>
-                <th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
+                <th>Type</th><th>CE/PE</th><th>Strike</th><th>Expiry</th>
+                <th>Side</th><th>Entry</th><th>Exit</th>
+                <th>Lot Size</th><th>Lots</th><th>Qty</th>
                 <th>Status</th><th>P&L</th><th>Exit Reason</th><th>Action</th>
             </tr>
             {rows}
