@@ -11,34 +11,40 @@ DB = "trades.db"
 MAX_TRADES_PER_DAY = 20
 MAX_DAILY_LOSS = -2000
 
+
 class Signal(BaseModel):
     strategy_id: str = "A"
     symbol: str
     signal: str
     price: float
 
-    trade_type: str = "OPTION"
-    option_type: str = "CE"   # CE / PE
+    trade_type: str = "EQUITY"   # EQUITY / OPTION
+    option_type: str = ""        # CE / PE
     strike: float = 0
     expiry: str = ""
-    lot_size: int = 75
+    lot_size: int = 1
     lots: int = 1
 
     alert_id: str | None = None
+
 
 def conn():
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
     return c
 
+
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def today():
     return date.today().strftime("%Y-%m-%d")
 
+
 def init_db():
     c = conn()
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS trades(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,15 +80,18 @@ def init_db():
     c.commit()
     c.close()
 
+
 init_db()
+
 
 @app.get("/")
 def home():
     return {
-        "status": "Option Paper Algo Running",
+        "status": "Equity + Option Paper Algo Running",
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
+
 
 @app.post("/webhook")
 def webhook(s: Signal):
@@ -90,11 +99,12 @@ def webhook(s: Signal):
     symbol = s.symbol.upper()
     strategy = s.strategy_id.upper()
     price = float(s.price)
+
     trade_type = s.trade_type.upper()
     option_type = s.option_type.upper()
     qty = int(s.lot_size) * int(s.lots)
 
-    raw = f"{strategy}-{symbol}-{signal}-{price}-{qty}-{s.alert_id}"
+    raw = f"{strategy}-{symbol}-{signal}-{price}-{qty}-{trade_type}-{s.alert_id}"
     alert_hash = hashlib.sha256(raw.encode()).hexdigest()
 
     c = conn()
@@ -150,7 +160,13 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {"status": "success", "message": f"{signal} option trade opened", "qty": qty}
+        return {
+            "status": "success",
+            "message": f"{signal} trade opened",
+            "symbol": symbol,
+            "trade_type": trade_type,
+            "qty": qty
+        }
 
     if signal in ["EXIT", "CLOSE"]:
         if not open_trade:
@@ -160,7 +176,10 @@ def webhook(s: Signal):
         entry = open_trade["entry"]
         side = open_trade["side"]
 
-        pnl = (price - entry) * open_trade["qty"] if side == "BUY" else (entry - price) * open_trade["qty"]
+        if side == "BUY":
+            pnl = (price - entry) * open_trade["qty"]
+        else:
+            pnl = (entry - price) * open_trade["qty"]
 
         c.execute("""
         UPDATE trades
@@ -175,16 +194,23 @@ def webhook(s: Signal):
     c.close()
     return {"status": "error", "reason": "Invalid signal"}
 
+
 @app.get("/squareoff/{trade_id}")
 def squareoff(trade_id: int, price: float):
     c = conn()
-    t = c.execute("SELECT * FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
+    t = c.execute(
+        "SELECT * FROM trades WHERE id=? AND status='OPEN'",
+        (trade_id,)
+    ).fetchone()
 
     if not t:
         c.close()
         return RedirectResponse("/dashboard")
 
-    pnl = (price - t["entry"]) * t["qty"] if t["side"] == "BUY" else (t["entry"] - price) * t["qty"]
+    if t["side"] == "BUY":
+        pnl = (price - t["entry"]) * t["qty"]
+    else:
+        pnl = (t["entry"] - price) * t["qty"]
 
     c.execute("""
     UPDATE trades
@@ -196,6 +222,7 @@ def squareoff(trade_id: int, price: float):
     c.close()
     return RedirectResponse("/dashboard")
 
+
 @app.get("/reset")
 def reset():
     c = conn()
@@ -204,6 +231,7 @@ def reset():
     c.commit()
     c.close()
     return RedirectResponse("/dashboard")
+
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
@@ -215,8 +243,18 @@ def dashboard():
     open_trades = [t for t in trades if t["status"] == "OPEN"]
     today_closed = [t for t in closed if t["trade_date"] == today()]
 
+    option_closed = [t for t in closed if t["trade_type"] == "OPTION"]
+    equity_closed = [t for t in closed if t["trade_type"] == "EQUITY"]
+
+    option_pnl = sum(t["pnl"] for t in option_closed)
+    equity_pnl = sum(t["pnl"] for t in equity_closed)
+
+    option_trades = len(option_closed)
+    equity_trades = len(equity_closed)
+
     total_pnl = sum(t["pnl"] for t in closed)
     daily_pnl = sum(t["pnl"] for t in today_closed)
+
     total_trades = len(closed)
     wins = len([t for t in closed if t["pnl"] > 0])
     losses = len([t for t in closed if t["pnl"] < 0])
@@ -252,7 +290,7 @@ def dashboard():
             <td>{t['lots']}</td>
             <td>{t['qty']}</td>
             <td>{t['status']}</td>
-            <td style="color:{pnl_color};font-weight:bold;">{round(t['pnl'],2)}</td>
+            <td style="color:{pnl_color};font-weight:bold;">{round(t['pnl'], 2)}</td>
             <td>{t['exit_reason']}</td>
             <td>{square_btn}</td>
         </tr>
@@ -261,14 +299,16 @@ def dashboard():
     return f"""
     <html>
     <head>
-        <title>Option Algo Paper Dashboard</title>
+        <title>Equity + Option Paper Algo</title>
         <style>
             body {{
                 font-family: Arial;
                 background:#f4f6f8;
                 padding:20px;
             }}
-            h1 {{ color:#111; }}
+            h1 {{
+                color:#111;
+            }}
             .topbar {{
                 display:flex;
                 gap:10px;
@@ -313,7 +353,7 @@ def dashboard():
                 color:white;
             }}
             input {{
-                width:80px;
+                width:85px;
                 padding:5px;
             }}
             button {{
@@ -326,7 +366,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h1>Option Algo Paper Dashboard</h1>
+        <h1>Equity + Option Paper Algo Dashboard</h1>
 
         <div class="topbar">
             <a class="btn" href="/dashboard">Manual Refresh</a>
@@ -336,8 +376,12 @@ def dashboard():
         <div class="cards">
             <div class="card"><h3>Total P&L</h3><h2>{round(total_pnl,2)}</h2></div>
             <div class="card"><h3>Today P&L</h3><h2>{round(daily_pnl,2)}</h2></div>
+            <div class="card"><h3>Option P&L</h3><h2>{round(option_pnl,2)}</h2></div>
+            <div class="card"><h3>Equity P&L</h3><h2>{round(equity_pnl,2)}</h2></div>
             <div class="card"><h3>Open Trades</h3><h2>{len(open_trades)}</h2></div>
             <div class="card"><h3>Closed Trades</h3><h2>{total_trades}</h2></div>
+            <div class="card"><h3>Option Trades</h3><h2>{option_trades}</h2></div>
+            <div class="card"><h3>Equity Trades</h3><h2>{equity_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
             <div class="card"><h3>Wins / Losses</h3><h2>{wins} / {losses}</h2></div>
         </div>
