@@ -164,6 +164,7 @@ def webhook(s: Signal):
             "status": "success",
             "message": f"{signal} trade opened",
             "symbol": symbol,
+            "strategy_id": strategy,
             "trade_type": trade_type,
             "qty": qty
         }
@@ -189,7 +190,12 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {"status": "success", "message": "Trade closed", "pnl": pnl}
+        return {
+            "status": "success",
+            "message": "Trade closed",
+            "strategy_id": strategy,
+            "pnl": pnl
+        }
 
     c.close()
     return {"status": "error", "reason": "Invalid signal"}
@@ -234,9 +240,21 @@ def reset():
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard():
+def dashboard(strategy_filter: str = "ALL"):
+    selected_strategy = strategy_filter.upper()
+
     c = conn()
-    trades = c.execute("SELECT * FROM trades ORDER BY id DESC").fetchall()
+
+    all_trades = c.execute("SELECT * FROM trades ORDER BY id DESC").fetchall()
+
+    if selected_strategy == "ALL":
+        trades = all_trades
+    else:
+        trades = c.execute(
+            "SELECT * FROM trades WHERE strategy_id=? ORDER BY id DESC",
+            (selected_strategy,)
+        ).fetchall()
+
     c.close()
 
     closed = [t for t in trades if t["status"] == "CLOSED"]
@@ -259,6 +277,52 @@ def dashboard():
     wins = len([t for t in closed if t["pnl"] > 0])
     losses = len([t for t in closed if t["pnl"] < 0])
     winrate = round((wins / total_trades) * 100, 2) if total_trades else 0
+
+    strategy_stats = {}
+    for t in all_trades:
+        sid = t["strategy_id"]
+
+        if sid not in strategy_stats:
+            strategy_stats[sid] = {
+                "pnl": 0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "open": 0
+            }
+
+        if t["status"] == "OPEN":
+            strategy_stats[sid]["open"] += 1
+
+        if t["status"] == "CLOSED":
+            strategy_stats[sid]["pnl"] += t["pnl"]
+            strategy_stats[sid]["trades"] += 1
+
+            if t["pnl"] > 0:
+                strategy_stats[sid]["wins"] += 1
+            elif t["pnl"] < 0:
+                strategy_stats[sid]["losses"] += 1
+
+    strategy_options = '<option value="ALL">ALL</option>'
+    for sid in sorted(strategy_stats.keys()):
+        selected = "selected" if selected_strategy == sid else ""
+        strategy_options += f'<option value="{sid}" {selected}>{sid}</option>'
+
+    strategy_cards = ""
+    for sid, st in strategy_stats.items():
+        wr = round((st["wins"] / st["trades"]) * 100, 2) if st["trades"] else 0
+        pnl_color = "green" if st["pnl"] > 0 else "red" if st["pnl"] < 0 else "black"
+
+        strategy_cards += f"""
+        <div class="card">
+            <h3>Strategy {sid}</h3>
+            <h2 style="color:{pnl_color};">{round(st['pnl'], 2)}</h2>
+            <p>Closed Trades: {st['trades']}</p>
+            <p>Open Trades: {st['open']}</p>
+            <p>Wins/Losses: {st['wins']} / {st['losses']}</p>
+            <p>Win Rate: {wr}%</p>
+        </div>
+        """
 
     rows = ""
     for t in trades:
@@ -313,6 +377,8 @@ def dashboard():
                 display:flex;
                 gap:10px;
                 margin-bottom:15px;
+                flex-wrap:wrap;
+                align-items:center;
             }}
             .btn {{
                 padding:10px 15px;
@@ -320,6 +386,8 @@ def dashboard():
                 color:white;
                 border-radius:6px;
                 text-decoration:none;
+                border:none;
+                cursor:pointer;
             }}
             .danger {{
                 background:#c0392b;
@@ -328,6 +396,7 @@ def dashboard():
                 display:flex;
                 gap:15px;
                 flex-wrap:wrap;
+                margin-bottom:20px;
             }}
             .card {{
                 background:white;
@@ -352,16 +421,21 @@ def dashboard():
                 background:#111;
                 color:white;
             }}
+            input, select {{
+                padding:8px;
+                border-radius:5px;
+                border:1px solid #aaa;
+            }}
             input {{
                 width:85px;
-                padding:5px;
             }}
             button {{
-                padding:6px 10px;
+                padding:8px 12px;
                 background:#111;
                 color:white;
                 border:none;
                 border-radius:5px;
+                cursor:pointer;
             }}
         </style>
     </head>
@@ -371,9 +445,18 @@ def dashboard():
         <div class="topbar">
             <a class="btn" href="/dashboard">Manual Refresh</a>
             <a class="btn danger" href="/reset">Reset All Trades</a>
+
+            <form method="get" action="/dashboard">
+                <label><b>Filter Strategy:</b></label>
+                <select name="strategy_filter">
+                    {strategy_options}
+                </select>
+                <button type="submit">Apply</button>
+            </form>
         </div>
 
         <div class="cards">
+            <div class="card"><h3>Selected Strategy</h3><h2>{selected_strategy}</h2></div>
             <div class="card"><h3>Total P&L</h3><h2>{round(total_pnl,2)}</h2></div>
             <div class="card"><h3>Today P&L</h3><h2>{round(daily_pnl,2)}</h2></div>
             <div class="card"><h3>Option P&L</h3><h2>{round(option_pnl,2)}</h2></div>
@@ -384,6 +467,11 @@ def dashboard():
             <div class="card"><h3>Equity Trades</h3><h2>{equity_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
             <div class="card"><h3>Wins / Losses</h3><h2>{wins} / {losses}</h2></div>
+        </div>
+
+        <h2>Strategy-wise Performance</h2>
+        <div class="cards">
+            {strategy_cards}
         </div>
 
         <table>
