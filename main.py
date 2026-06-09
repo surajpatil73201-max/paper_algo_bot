@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 import sqlite3
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 import hashlib
 
 app = FastAPI()
@@ -35,13 +36,15 @@ def conn():
 
 
 def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(
+        ZoneInfo("Asia/Kolkata")
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def today():
-    return date.today().strftime("%Y-%m-%d")
-
-
+    return datetime.now(
+        ZoneInfo("Asia/Kolkata")
+    ).strftime("%Y-%m-%d")
 def init_db():
     c = conn()
 
