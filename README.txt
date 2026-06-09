@@ -1,0 +1,1 @@
+Starter project for paper algo bot
