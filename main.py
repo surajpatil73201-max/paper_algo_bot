@@ -90,7 +90,7 @@ init_db()
 @app.get("/")
 def home():
     return {
-        "status": "Equity + Option Paper Algo Running",
+        "status": "HII Suhani",
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
