@@ -89,8 +89,7 @@ init_db()
 
 @app.get("/")
 def home():
-    return {
-        "status": "HII Suhani",
+    return {"status": "Equity + Option Paper Algo Running",
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
@@ -366,7 +365,7 @@ def dashboard(strategy_filter: str = "ALL"):
     return f"""
     <html>
     <head>
-        <title>Equity + Option Paper Algo</title>
+        <title>hii Suhani</title>
         <style>
             body {{
                 font-family: Arial;
