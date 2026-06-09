@@ -365,7 +365,7 @@ def dashboard(strategy_filter: str = "ALL"):
     return f"""
     <html>
     <head>
-        <title>hii Suhani</title>
+        <title>bot</title>
         <style>
             body {{
                 font-family: Arial;
