@@ -21,16 +21,15 @@ PASSWORD = "12345"
 
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
-    username_ok = secrets.compare_digest(credentials.username, USERNAME)
-    password_ok = secrets.compare_digest(credentials.password, PASSWORD)
-
-    if not (username_ok and password_ok):
+    if not (
+        secrets.compare_digest(credentials.username, USERNAME)
+        and secrets.compare_digest(credentials.password, PASSWORD)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Login",
             headers={"WWW-Authenticate": "Basic"},
         )
-
     return credentials.username
 
 
@@ -39,14 +38,12 @@ class Signal(BaseModel):
     symbol: str
     signal: str
     price: float
-
     trade_type: str = "EQUITY"
     option_type: str = ""
     strike: float = 0
     expiry: str = ""
     lot_size: int = 1
     lots: int = 1
-
     alert_id: str | None = None
 
 
@@ -66,7 +63,6 @@ def today():
 
 def init_db():
     c = conn()
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS trades(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +85,6 @@ def init_db():
         exit_reason TEXT
     )
     """)
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS alerts(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +93,6 @@ def init_db():
         raw TEXT
     )
     """)
-
     c.commit()
     c.close()
 
@@ -108,11 +102,7 @@ init_db()
 
 @app.get("/")
 def home():
-    return {
-        "status": "Equity + Option Paper Algo Running",
-        "dashboard": "/dashboard",
-        "webhook": "/webhook"
-    }
+    return {"status": "Algo Paper Dashboard Running", "dashboard": "/dashboard"}
 
 
 @app.post("/webhook")
@@ -121,7 +111,6 @@ def webhook(s: Signal):
     symbol = s.symbol.upper()
     strategy = s.strategy_id.upper()
     price = float(s.price)
-
     trade_type = s.trade_type.upper()
     option_type = s.option_type.upper()
     qty = int(s.lot_size) * int(s.lots)
@@ -182,14 +171,7 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {
-            "status": "success",
-            "message": f"{signal} trade opened",
-            "symbol": symbol,
-            "strategy_id": strategy,
-            "trade_type": trade_type,
-            "qty": qty
-        }
+        return {"status": "success", "message": f"{signal} trade opened", "qty": qty}
 
     if signal in ["EXIT", "CLOSE"]:
         if not open_trade:
@@ -199,10 +181,7 @@ def webhook(s: Signal):
         entry = open_trade["entry"]
         side = open_trade["side"]
 
-        if side == "BUY":
-            pnl = (price - entry) * open_trade["qty"]
-        else:
-            pnl = (entry - price) * open_trade["qty"]
+        pnl = (price - entry) * open_trade["qty"] if side == "BUY" else (entry - price) * open_trade["qty"]
 
         c.execute("""
         UPDATE trades
@@ -212,37 +191,22 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {
-            "status": "success",
-            "message": "Trade closed",
-            "strategy_id": strategy,
-            "pnl": pnl
-        }
+        return {"status": "success", "message": "Trade closed", "pnl": pnl}
 
     c.close()
     return {"status": "error", "reason": "Invalid signal"}
 
 
 @app.get("/squareoff/{trade_id}")
-def squareoff(
-    trade_id: int,
-    price: float,
-    user: str = Depends(authenticate)
-):
+def squareoff(trade_id: int, price: float, user: str = Depends(authenticate)):
     c = conn()
-    t = c.execute(
-        "SELECT * FROM trades WHERE id=? AND status='OPEN'",
-        (trade_id,)
-    ).fetchone()
+    t = c.execute("SELECT * FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
 
     if not t:
         c.close()
         return RedirectResponse("/dashboard")
 
-    if t["side"] == "BUY":
-        pnl = (price - t["entry"]) * t["qty"]
-    else:
-        pnl = (t["entry"] - price) * t["qty"]
+    pnl = (price - t["entry"]) * t["qty"] if t["side"] == "BUY" else (t["entry"] - price) * t["qty"]
 
     c.execute("""
     UPDATE trades
@@ -266,14 +230,10 @@ def reset(user: str = Depends(authenticate)):
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(
-    strategy_filter: str = "ALL",
-    user: str = Depends(authenticate)
-):
+def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
     selected_strategy = strategy_filter.upper()
 
     c = conn()
-
     all_trades = c.execute("SELECT * FROM trades ORDER BY id DESC").fetchall()
 
     if selected_strategy == "ALL":
@@ -293,14 +253,10 @@ def dashboard(
     option_closed = [t for t in closed if t["trade_type"] == "OPTION"]
     equity_closed = [t for t in closed if t["trade_type"] == "EQUITY"]
 
-    option_pnl = sum(t["pnl"] for t in option_closed)
-    equity_pnl = sum(t["pnl"] for t in equity_closed)
-
-    option_trades = len(option_closed)
-    equity_trades = len(equity_closed)
-
     total_pnl = sum(t["pnl"] for t in closed)
     daily_pnl = sum(t["pnl"] for t in today_closed)
+    option_pnl = sum(t["pnl"] for t in option_closed)
+    equity_pnl = sum(t["pnl"] for t in equity_closed)
 
     total_trades = len(closed)
     wins = len([t for t in closed if t["pnl"] > 0])
@@ -308,17 +264,14 @@ def dashboard(
     winrate = round((wins / total_trades) * 100, 2) if total_trades else 0
 
     strategy_stats = {}
+    daily_stats = {}
+
     for t in all_trades:
         sid = t["strategy_id"]
+        d = t["trade_date"]
 
         if sid not in strategy_stats:
-            strategy_stats[sid] = {
-                "pnl": 0,
-                "trades": 0,
-                "wins": 0,
-                "losses": 0,
-                "open": 0
-            }
+            strategy_stats[sid] = {"pnl": 0, "trades": 0, "wins": 0, "losses": 0, "open": 0}
 
         if t["status"] == "OPEN":
             strategy_stats[sid]["open"] += 1
@@ -332,25 +285,65 @@ def dashboard(
             elif t["pnl"] < 0:
                 strategy_stats[sid]["losses"] += 1
 
+            if d not in daily_stats:
+                daily_stats[d] = {"pnl": 0, "trades": 0, "wins": 0, "losses": 0}
+
+            daily_stats[d]["pnl"] += t["pnl"]
+            daily_stats[d]["trades"] += 1
+
+            if t["pnl"] > 0:
+                daily_stats[d]["wins"] += 1
+            elif t["pnl"] < 0:
+                daily_stats[d]["losses"] += 1
+
     strategy_options = '<option value="ALL">ALL</option>'
     for sid in sorted(strategy_stats.keys()):
         selected = "selected" if selected_strategy == sid else ""
         strategy_options += f'<option value="{sid}" {selected}>{sid}</option>'
 
     strategy_cards = ""
-    for sid, st in strategy_stats.items():
+    strategy_rows = ""
+
+    for sid, st in sorted(strategy_stats.items()):
         wr = round((st["wins"] / st["trades"]) * 100, 2) if st["trades"] else 0
-        pnl_color = "green" if st["pnl"] > 0 else "red" if st["pnl"] < 0 else "black"
+        color = "green" if st["pnl"] > 0 else "red" if st["pnl"] < 0 else "black"
 
         strategy_cards += f"""
         <div class="card">
             <h3>Strategy {sid}</h3>
-            <h2 style="color:{pnl_color};">{round(st['pnl'], 2)}</h2>
-            <p>Closed Trades: {st['trades']}</p>
-            <p>Open Trades: {st['open']}</p>
-            <p>Wins/Losses: {st['wins']} / {st['losses']}</p>
+            <h2 style="color:{color};">{round(st['pnl'], 2)}</h2>
+            <p>Closed: {st['trades']}</p>
+            <p>Open: {st['open']}</p>
             <p>Win Rate: {wr}%</p>
         </div>
+        """
+
+        strategy_rows += f"""
+        <tr>
+            <td>{sid}</td>
+            <td>{st['trades']}</td>
+            <td>{st['open']}</td>
+            <td>{st['wins']}</td>
+            <td>{st['losses']}</td>
+            <td>{wr}%</td>
+            <td style="color:{color};font-weight:bold;">{round(st['pnl'],2)}</td>
+        </tr>
+        """
+
+    daily_rows = ""
+    for d, st in sorted(daily_stats.items(), reverse=True):
+        wr = round((st["wins"] / st["trades"]) * 100, 2) if st["trades"] else 0
+        color = "green" if st["pnl"] > 0 else "red" if st["pnl"] < 0 else "black"
+
+        daily_rows += f"""
+        <tr>
+            <td>{d}</td>
+            <td>{st['trades']}</td>
+            <td>{st['wins']}</td>
+            <td>{st['losses']}</td>
+            <td>{wr}%</td>
+            <td style="color:{color};font-weight:bold;">{round(st['pnl'],2)}</td>
+        </tr>
         """
 
     rows = ""
@@ -379,8 +372,6 @@ def dashboard(
             <td>{t['side']}</td>
             <td>{t['entry']}</td>
             <td>{t['exit']}</td>
-            <td>{t['lot_size']}</td>
-            <td>{t['lots']}</td>
             <td>{t['qty']}</td>
             <td>{t['status']}</td>
             <td style="color:{pnl_color};font-weight:bold;">{round(t['pnl'], 2)}</td>
@@ -392,78 +383,25 @@ def dashboard(
     return f"""
     <html>
     <head>
-        <title>Equity + Option Paper Algo</title>
+        <title>Algo Dashboard</title>
         <style>
-            body {{
-                font-family: Arial;
-                background:#f4f6f8;
-                padding:20px;
-            }}
-            h1 {{ color:#111; }}
-            .topbar {{
-                display:flex;
-                gap:10px;
-                margin-bottom:15px;
-                flex-wrap:wrap;
-                align-items:center;
-            }}
-            .btn {{
-                padding:10px 15px;
-                background:#111;
-                color:white;
-                border-radius:6px;
-                text-decoration:none;
-                border:none;
-                cursor:pointer;
-            }}
+            body {{ font-family: Arial; background:#f4f6f8; padding:20px; }}
+            h1,h2 {{ color:#111; }}
+            .topbar {{ display:flex; gap:10px; margin-bottom:15px; flex-wrap:wrap; align-items:center; }}
+            .btn {{ padding:10px 15px; background:#111; color:white; border-radius:6px; text-decoration:none; border:none; cursor:pointer; }}
             .danger {{ background:#c0392b; }}
-            .cards {{
-                display:flex;
-                gap:15px;
-                flex-wrap:wrap;
-                margin-bottom:20px;
-            }}
-            .card {{
-                background:white;
-                padding:18px;
-                border-radius:10px;
-                min-width:170px;
-                box-shadow:0 2px 6px #ccc;
-            }}
-            table {{
-                width:100%;
-                border-collapse:collapse;
-                background:white;
-                margin-top:20px;
-                font-size:13px;
-            }}
-            th,td {{
-                padding:8px;
-                border:1px solid #ddd;
-                text-align:center;
-            }}
-            th {{
-                background:#111;
-                color:white;
-            }}
-            input, select {{
-                padding:8px;
-                border-radius:5px;
-                border:1px solid #aaa;
-            }}
+            .cards {{ display:flex; gap:15px; flex-wrap:wrap; margin-bottom:20px; }}
+            .card {{ background:white; padding:18px; border-radius:10px; min-width:170px; box-shadow:0 2px 6px #ccc; }}
+            table {{ width:100%; border-collapse:collapse; background:white; margin-top:15px; margin-bottom:30px; font-size:13px; }}
+            th,td {{ padding:8px; border:1px solid #ddd; text-align:center; }}
+            th {{ background:#111; color:white; }}
+            input,select {{ padding:8px; border-radius:5px; border:1px solid #aaa; }}
             input {{ width:85px; }}
-            button {{
-                padding:8px 12px;
-                background:#111;
-                color:white;
-                border:none;
-                border-radius:5px;
-                cursor:pointer;
-            }}
+            button {{ padding:8px 12px; background:#111; color:white; border:none; border-radius:5px; cursor:pointer; }}
         </style>
     </head>
     <body>
-        <h1>Equity + Option Paper Algo Dashboard</h1>
+        <h1>Algo Paper Trading Dashboard</h1>
 
         <div class="topbar">
             <a class="btn" href="/dashboard">Manual Refresh</a>
@@ -471,9 +409,7 @@ def dashboard(
 
             <form method="get" action="/dashboard">
                 <label><b>Filter Strategy:</b></label>
-                <select name="strategy_filter">
-                    {strategy_options}
-                </select>
+                <select name="strategy_filter">{strategy_options}</select>
                 <button type="submit">Apply</button>
             </form>
         </div>
@@ -486,26 +422,38 @@ def dashboard(
             <div class="card"><h3>Equity P&L</h3><h2>{round(equity_pnl,2)}</h2></div>
             <div class="card"><h3>Open Trades</h3><h2>{len(open_trades)}</h2></div>
             <div class="card"><h3>Closed Trades</h3><h2>{total_trades}</h2></div>
-            <div class="card"><h3>Option Trades</h3><h2>{option_trades}</h2></div>
-            <div class="card"><h3>Equity Trades</h3><h2>{equity_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
             <div class="card"><h3>Wins / Losses</h3><h2>{wins} / {losses}</h2></div>
         </div>
 
-        <h2>Strategy-wise Performance</h2>
-        <div class="cards">
-            {strategy_cards}
-        </div>
+        <h2>Strategy Performance</h2>
+        <div class="cards">{strategy_cards}</div>
 
+        <h2>Trade Log</h2>
         <table>
             <tr>
                 <th>ID</th><th>Time</th><th>Strategy</th><th>Symbol</th>
                 <th>Type</th><th>CE/PE</th><th>Strike</th><th>Expiry</th>
-                <th>Side</th><th>Entry</th><th>Exit</th>
-                <th>Lot Size</th><th>Lots</th><th>Qty</th>
+                <th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
                 <th>Status</th><th>P&L</th><th>Exit Reason</th><th>Action</th>
             </tr>
             {rows}
+        </table>
+
+        <h2>Daily Report</h2>
+        <table>
+            <tr>
+                <th>Date</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th>
+            </tr>
+            {daily_rows}
+        </table>
+
+        <h2>Strategy Report</h2>
+        <table>
+            <tr>
+                <th>Strategy</th><th>Closed Trades</th><th>Open Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th>
+            </tr>
+            {strategy_rows}
         </table>
     </body>
     </html>
