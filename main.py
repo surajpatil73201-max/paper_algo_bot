@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import sqlite3
@@ -7,6 +7,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import hashlib
 import secrets
+import csv
+import io
 
 app = FastAPI()
 DB = "trades.db"
@@ -63,6 +65,7 @@ def today():
 
 def init_db():
     c = conn()
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS trades(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +88,7 @@ def init_db():
         exit_reason TEXT
     )
     """)
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS alerts(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,6 +97,7 @@ def init_db():
         raw TEXT
     )
     """)
+
     c.commit()
     c.close()
 
@@ -102,7 +107,11 @@ init_db()
 
 @app.get("/")
 def home():
-    return {"status": "Algo Paper Dashboard Running", "dashboard": "/dashboard"}
+    return {
+        "status": "Algo Paper Dashboard Running",
+        "dashboard": "/dashboard",
+        "webhook": "/webhook"
+    }
 
 
 @app.post("/webhook")
@@ -200,7 +209,10 @@ def webhook(s: Signal):
 @app.get("/squareoff/{trade_id}")
 def squareoff(trade_id: int, price: float, user: str = Depends(authenticate)):
     c = conn()
-    t = c.execute("SELECT * FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
+    t = c.execute(
+        "SELECT * FROM trades WHERE id=? AND status='OPEN'",
+        (trade_id,)
+    ).fetchone()
 
     if not t:
         c.close()
@@ -227,6 +239,54 @@ def reset(user: str = Depends(authenticate)):
     c.commit()
     c.close()
     return RedirectResponse("/dashboard")
+
+
+@app.get("/export_csv")
+def export_csv(user: str = Depends(authenticate)):
+    c = conn()
+    trades = c.execute("SELECT * FROM trades ORDER BY id DESC").fetchall()
+    c.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "ID", "Time", "Date", "Strategy", "Symbol", "Trade Type",
+        "Option Type", "Strike", "Expiry", "Side", "Entry", "Exit",
+        "Lot Size", "Lots", "Qty", "Status", "PnL", "Exit Reason"
+    ])
+
+    for t in trades:
+        writer.writerow([
+            t["id"],
+            t["time"],
+            t["trade_date"],
+            t["strategy_id"],
+            t["symbol"],
+            t["trade_type"],
+            t["option_type"],
+            t["strike"],
+            t["expiry"],
+            t["side"],
+            t["entry"],
+            t["exit"],
+            t["lot_size"],
+            t["lots"],
+            t["qty"],
+            t["status"],
+            t["pnl"],
+            t["exit_reason"]
+        ])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=algo_trades_report.csv"
+        }
+    )
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -390,6 +450,7 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             .topbar {{ display:flex; gap:10px; margin-bottom:15px; flex-wrap:wrap; align-items:center; }}
             .btn {{ padding:10px 15px; background:#111; color:white; border-radius:6px; text-decoration:none; border:none; cursor:pointer; }}
             .danger {{ background:#c0392b; }}
+            .download {{ background:#2980b9; }}
             .cards {{ display:flex; gap:15px; flex-wrap:wrap; margin-bottom:20px; }}
             .card {{ background:white; padding:18px; border-radius:10px; min-width:170px; box-shadow:0 2px 6px #ccc; }}
             table {{ width:100%; border-collapse:collapse; background:white; margin-top:15px; margin-bottom:30px; font-size:13px; }}
@@ -405,6 +466,7 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
 
         <div class="topbar">
             <a class="btn" href="/dashboard">Manual Refresh</a>
+            <a class="btn download" href="/export_csv">Download CSV</a>
             <a class="btn danger" href="/reset">Reset All Trades</a>
 
             <form method="get" action="/dashboard">
