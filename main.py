@@ -11,7 +11,7 @@ import csv
 import io
 import json
 import os
-
+from kotak_client import KotakClient
 app = FastAPI()
 DB = "trades.db"
 
@@ -197,9 +197,46 @@ def log_broker_order(s: Signal, order_side: str, qty: int, status_text: str):
 
 
 def broker_action(s: Signal, order_side: str, qty: int):
+
     if TRADING_MODE == "PAPER":
         return
 
+    if TRADING_MODE == "TEST":
+        log_broker_order(
+            s,
+            order_side,
+            qty,
+            "TEST_ORDER_NOT_SENT"
+        )
+        return
+
+    if TRADING_MODE == "LIVE":
+
+        payload = build_broker_payload(
+            s,
+            order_side,
+            qty
+        )
+
+        kotak = KotakClient()
+
+        result = kotak.place_order(
+            payload
+        )
+
+        status_text = result.get(
+            "status",
+            "LIVE_UNKNOWN"
+        )
+
+        log_broker_order(
+            s,
+            order_side,
+            qty,
+            status_text
+        )
+
+        return
     if TRADING_MODE == "TEST":
         log_broker_order(s, order_side, qty, "TEST_ORDER_NOT_SENT")
         return
