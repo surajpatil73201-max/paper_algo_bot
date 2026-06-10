@@ -9,17 +9,25 @@ import hashlib
 import secrets
 import csv
 import io
+import json
+import os
 
 app = FastAPI()
 DB = "trades.db"
 
+# ================= BASIC SETTINGS =================
 MAX_TRADES_PER_DAY = 20
 MAX_DAILY_LOSS = -2000
 
-security = HTTPBasic()
+# PAPER = only paper trade
+# TEST  = paper trade + broker order payload log
+# LIVE  = future Kotak API real order
+TRADING_MODE = os.getenv("TRADING_MODE", "TEST")
 
-USERNAME = "admin"
-PASSWORD = "12345"
+# ================= LOGIN =================
+security = HTTPBasic()
+USERNAME = os.getenv("APP_USER", "admin")
+PASSWORD = os.getenv("APP_PASSWORD", "12345")
 
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
@@ -35,20 +43,31 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 
+# ================= SIGNAL MODEL =================
 class Signal(BaseModel):
     strategy_id: str = "A"
     symbol: str
     signal: str
     price: float
-    trade_type: str = "EQUITY"
-    option_type: str = ""
+
+    trade_type: str = "EQUITY"      # EQUITY / OPTION
+    option_type: str = ""           # CE / PE
     strike: float = 0
     expiry: str = ""
     lot_size: int = 1
     lots: int = 1
+
+    exchange: str = "NSE"           # NSE / NFO
+    product: str = "MIS"            # MIS / CNC / NRML
+    order_type: str = "MARKET"      # MARKET / LIMIT
+    validity: str = "DAY"
+    disclosed_qty: int = 0
+    trigger_price: float = 0
+
     alert_id: str | None = None
 
 
+# ================= DB HELPERS =================
 def conn():
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
@@ -98,6 +117,26 @@ def init_db():
     )
     """)
 
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS broker_orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        time TEXT,
+        mode TEXT,
+        strategy_id TEXT,
+        symbol TEXT,
+        signal TEXT,
+        order_side TEXT,
+        qty INTEGER,
+        price REAL,
+        exchange TEXT,
+        product TEXT,
+        order_type TEXT,
+        validity TEXT,
+        status TEXT,
+        payload TEXT
+    )
+    """)
+
     c.commit()
     c.close()
 
@@ -105,10 +144,78 @@ def init_db():
 init_db()
 
 
+# ================= BROKER PAYLOAD =================
+def build_broker_payload(s: Signal, order_side: str, qty: int):
+    payload = {
+        "strategy_id": s.strategy_id.upper(),
+        "symbol": s.symbol.upper(),
+        "transaction_type": order_side,
+        "quantity": qty,
+        "price": float(s.price),
+        "exchange": s.exchange.upper(),
+        "product": s.product.upper(),
+        "order_type": s.order_type.upper(),
+        "validity": s.validity.upper(),
+        "disclosed_qty": s.disclosed_qty,
+        "trigger_price": s.trigger_price,
+        "trade_type": s.trade_type.upper(),
+        "option_type": s.option_type.upper(),
+        "strike": s.strike,
+        "expiry": s.expiry
+    }
+    return payload
+
+
+def log_broker_order(s: Signal, order_side: str, qty: int, status_text: str):
+    payload = build_broker_payload(s, order_side, qty)
+
+    c = conn()
+    c.execute("""
+    INSERT INTO broker_orders(
+        time, mode, strategy_id, symbol, signal, order_side, qty, price,
+        exchange, product, order_type, validity, status, payload
+    )
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        now(),
+        TRADING_MODE,
+        s.strategy_id.upper(),
+        s.symbol.upper(),
+        s.signal.upper(),
+        order_side,
+        qty,
+        float(s.price),
+        s.exchange.upper(),
+        s.product.upper(),
+        s.order_type.upper(),
+        s.validity.upper(),
+        status_text,
+        json.dumps(payload)
+    ))
+    c.commit()
+    c.close()
+
+
+def broker_action(s: Signal, order_side: str, qty: int):
+    if TRADING_MODE == "PAPER":
+        return
+
+    if TRADING_MODE == "TEST":
+        log_broker_order(s, order_side, qty, "TEST_ORDER_NOT_SENT")
+        return
+
+    if TRADING_MODE == "LIVE":
+        # Future Kotak Neo API order placement yaha add hoga
+        log_broker_order(s, order_side, qty, "LIVE_PLACEHOLDER_NOT_SENT")
+        return
+
+
+# ================= ROUTES =================
 @app.get("/")
 def home():
     return {
-        "status": "Algo Paper Dashboard Running",
+        "status": "Algo Dashboard Running",
+        "mode": TRADING_MODE,
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
@@ -180,7 +287,15 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {"status": "success", "message": f"{signal} trade opened", "qty": qty}
+
+        broker_action(s, signal, qty)
+
+        return {
+            "status": "success",
+            "message": f"{signal} trade opened",
+            "mode": TRADING_MODE,
+            "qty": qty
+        }
 
     if signal in ["EXIT", "CLOSE"]:
         if not open_trade:
@@ -200,35 +315,19 @@ def webhook(s: Signal):
 
         c.commit()
         c.close()
-        return {"status": "success", "message": "Trade closed", "pnl": pnl}
+
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        broker_action(s, exit_side, open_trade["qty"])
+
+        return {
+            "status": "success",
+            "message": "Trade closed",
+            "mode": TRADING_MODE,
+            "pnl": pnl
+        }
 
     c.close()
     return {"status": "error", "reason": "Invalid signal"}
-
-
-@app.get("/squareoff/{trade_id}")
-def squareoff(trade_id: int, price: float, user: str = Depends(authenticate)):
-    c = conn()
-    t = c.execute(
-        "SELECT * FROM trades WHERE id=? AND status='OPEN'",
-        (trade_id,)
-    ).fetchone()
-
-    if not t:
-        c.close()
-        return RedirectResponse("/dashboard")
-
-    pnl = (price - t["entry"]) * t["qty"] if t["side"] == "BUY" else (t["entry"] - price) * t["qty"]
-
-    c.execute("""
-    UPDATE trades
-    SET exit=?, status='CLOSED', pnl=?, exit_reason=?
-    WHERE id=?
-    """, (price, pnl, "MANUAL SQUAREOFF", trade_id))
-
-    c.commit()
-    c.close()
-    return RedirectResponse("/dashboard")
 
 
 @app.get("/reset")
@@ -236,6 +335,7 @@ def reset(user: str = Depends(authenticate)):
     c = conn()
     c.execute("DELETE FROM trades")
     c.execute("DELETE FROM alerts")
+    c.execute("DELETE FROM broker_orders")
     c.commit()
     c.close()
     return RedirectResponse("/dashboard")
@@ -258,24 +358,10 @@ def export_csv(user: str = Depends(authenticate)):
 
     for t in trades:
         writer.writerow([
-            t["id"],
-            t["time"],
-            t["trade_date"],
-            t["strategy_id"],
-            t["symbol"],
-            t["trade_type"],
-            t["option_type"],
-            t["strike"],
-            t["expiry"],
-            t["side"],
-            t["entry"],
-            t["exit"],
-            t["lot_size"],
-            t["lots"],
-            t["qty"],
-            t["status"],
-            t["pnl"],
-            t["exit_reason"]
+            t["id"], t["time"], t["trade_date"], t["strategy_id"],
+            t["symbol"], t["trade_type"], t["option_type"], t["strike"],
+            t["expiry"], t["side"], t["entry"], t["exit"], t["lot_size"],
+            t["lots"], t["qty"], t["status"], t["pnl"], t["exit_reason"]
         ])
 
     output.seek(0)
@@ -283,9 +369,7 @@ def export_csv(user: str = Depends(authenticate)):
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=algo_trades_report.csv"
-        }
+        headers={"Content-Disposition": "attachment; filename=algo_trades_report.csv"}
     )
 
 
@@ -295,6 +379,7 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
 
     c = conn()
     all_trades = c.execute("SELECT * FROM trades ORDER BY id DESC").fetchall()
+    broker_orders = c.execute("SELECT * FROM broker_orders ORDER BY id DESC LIMIT 50").fetchall()
 
     if selected_strategy == "ALL":
         trades = all_trades
@@ -362,8 +447,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
         strategy_options += f'<option value="{sid}" {selected}>{sid}</option>'
 
     strategy_cards = ""
-    strategy_rows = ""
-
     for sid, st in sorted(strategy_stats.items()):
         wr = round((st["wins"] / st["trades"]) * 100, 2) if st["trades"] else 0
         color = "green" if st["pnl"] > 0 else "red" if st["pnl"] < 0 else "black"
@@ -376,18 +459,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <p>Open: {st['open']}</p>
             <p>Win Rate: {wr}%</p>
         </div>
-        """
-
-        strategy_rows += f"""
-        <tr>
-            <td>{sid}</td>
-            <td>{st['trades']}</td>
-            <td>{st['open']}</td>
-            <td>{st['wins']}</td>
-            <td>{st['losses']}</td>
-            <td>{wr}%</td>
-            <td style="color:{color};font-weight:bold;">{round(st['pnl'],2)}</td>
-        </tr>
         """
 
     daily_rows = ""
@@ -408,15 +479,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
 
     rows = ""
     for t in trades:
-        square_btn = ""
-        if t["status"] == "OPEN":
-            square_btn = f"""
-            <form action="/squareoff/{t['id']}" method="get">
-                <input name="price" placeholder="Exit Price" required>
-                <button>Square Off</button>
-            </form>
-            """
-
         pnl_color = "green" if t["pnl"] > 0 else "red" if t["pnl"] < 0 else "black"
 
         rows += f"""
@@ -426,9 +488,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <td>{t['strategy_id']}</td>
             <td>{t['symbol']}</td>
             <td>{t['trade_type']}</td>
-            <td>{t['option_type']}</td>
-            <td>{t['strike']}</td>
-            <td>{t['expiry']}</td>
             <td>{t['side']}</td>
             <td>{t['entry']}</td>
             <td>{t['exit']}</td>
@@ -436,7 +495,26 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <td>{t['status']}</td>
             <td style="color:{pnl_color};font-weight:bold;">{round(t['pnl'], 2)}</td>
             <td>{t['exit_reason']}</td>
-            <td>{square_btn}</td>
+        </tr>
+        """
+
+    broker_rows = ""
+    for b in broker_orders:
+        broker_rows += f"""
+        <tr>
+            <td>{b['id']}</td>
+            <td>{b['time']}</td>
+            <td>{b['mode']}</td>
+            <td>{b['strategy_id']}</td>
+            <td>{b['symbol']}</td>
+            <td>{b['signal']}</td>
+            <td>{b['order_side']}</td>
+            <td>{b['qty']}</td>
+            <td>{b['price']}</td>
+            <td>{b['exchange']}</td>
+            <td>{b['product']}</td>
+            <td>{b['order_type']}</td>
+            <td>{b['status']}</td>
         </tr>
         """
 
@@ -451,18 +529,20 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             .btn {{ padding:10px 15px; background:#111; color:white; border-radius:6px; text-decoration:none; border:none; cursor:pointer; }}
             .danger {{ background:#c0392b; }}
             .download {{ background:#2980b9; }}
+            .mode {{ background:#fff3cd; padding:10px; border-radius:6px; margin-bottom:15px; font-weight:bold; }}
             .cards {{ display:flex; gap:15px; flex-wrap:wrap; margin-bottom:20px; }}
             .card {{ background:white; padding:18px; border-radius:10px; min-width:170px; box-shadow:0 2px 6px #ccc; }}
             table {{ width:100%; border-collapse:collapse; background:white; margin-top:15px; margin-bottom:30px; font-size:13px; }}
             th,td {{ padding:8px; border:1px solid #ddd; text-align:center; }}
             th {{ background:#111; color:white; }}
             input,select {{ padding:8px; border-radius:5px; border:1px solid #aaa; }}
-            input {{ width:85px; }}
             button {{ padding:8px 12px; background:#111; color:white; border:none; border-radius:5px; cursor:pointer; }}
         </style>
     </head>
     <body>
-        <h1>Algo Paper Trading Dashboard</h1>
+        <h1>Algo Paper + Broker Test Dashboard</h1>
+
+        <div class="mode">Current Mode: {TRADING_MODE}</div>
 
         <div class="topbar">
             <a class="btn" href="/dashboard">Manual Refresh</a>
@@ -485,7 +565,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <div class="card"><h3>Open Trades</h3><h2>{len(open_trades)}</h2></div>
             <div class="card"><h3>Closed Trades</h3><h2>{total_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
-            <div class="card"><h3>Wins / Losses</h3><h2>{wins} / {losses}</h2></div>
         </div>
 
         <h2>Strategy Performance</h2>
@@ -495,11 +574,20 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
         <table>
             <tr>
                 <th>ID</th><th>Time</th><th>Strategy</th><th>Symbol</th>
-                <th>Type</th><th>CE/PE</th><th>Strike</th><th>Expiry</th>
-                <th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
-                <th>Status</th><th>P&L</th><th>Exit Reason</th><th>Action</th>
+                <th>Type</th><th>Side</th><th>Entry</th><th>Exit</th>
+                <th>Qty</th><th>Status</th><th>P&L</th><th>Exit Reason</th>
             </tr>
             {rows}
+        </table>
+
+        <h2>Broker Order Test Log</h2>
+        <table>
+            <tr>
+                <th>ID</th><th>Time</th><th>Mode</th><th>Strategy</th><th>Symbol</th>
+                <th>Signal</th><th>Order Side</th><th>Qty</th><th>Price</th>
+                <th>Exchange</th><th>Product</th><th>Order Type</th><th>Status</th>
+            </tr>
+            {broker_rows}
         </table>
 
         <h2>Daily Report</h2>
@@ -508,14 +596,6 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
                 <th>Date</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th>
             </tr>
             {daily_rows}
-        </table>
-
-        <h2>Strategy Report</h2>
-        <table>
-            <tr>
-                <th>Strategy</th><th>Closed Trades</th><th>Open Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th>
-            </tr>
-            {strategy_rows}
         </table>
     </body>
     </html>
