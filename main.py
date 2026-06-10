@@ -1,16 +1,37 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import hashlib
+import secrets
 
 app = FastAPI()
 DB = "trades.db"
 
 MAX_TRADES_PER_DAY = 20
 MAX_DAILY_LOSS = -2000
+
+security = HTTPBasic()
+
+USERNAME = "admin"
+PASSWORD = "12345"
+
+
+def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
+    username_ok = secrets.compare_digest(credentials.username, USERNAME)
+    password_ok = secrets.compare_digest(credentials.password, PASSWORD)
+
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Login",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return credentials.username
 
 
 class Signal(BaseModel):
@@ -19,8 +40,8 @@ class Signal(BaseModel):
     signal: str
     price: float
 
-    trade_type: str = "EQUITY"   # EQUITY / OPTION
-    option_type: str = ""        # CE / PE
+    trade_type: str = "EQUITY"
+    option_type: str = ""
     strike: float = 0
     expiry: str = ""
     lot_size: int = 1
@@ -36,15 +57,13 @@ def conn():
 
 
 def now():
-    return datetime.now(
-        ZoneInfo("Asia/Kolkata")
-    ).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def today():
-    return datetime.now(
-        ZoneInfo("Asia/Kolkata")
-    ).strftime("%Y-%m-%d")
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+
+
 def init_db():
     c = conn()
 
@@ -89,7 +108,8 @@ init_db()
 
 @app.get("/")
 def home():
-    return {"status": "Equity + Option Paper Algo Running",
+    return {
+        "status": "Equity + Option Paper Algo Running",
         "dashboard": "/dashboard",
         "webhook": "/webhook"
     }
@@ -204,7 +224,11 @@ def webhook(s: Signal):
 
 
 @app.get("/squareoff/{trade_id}")
-def squareoff(trade_id: int, price: float):
+def squareoff(
+    trade_id: int,
+    price: float,
+    user: str = Depends(authenticate)
+):
     c = conn()
     t = c.execute(
         "SELECT * FROM trades WHERE id=? AND status='OPEN'",
@@ -232,7 +256,7 @@ def squareoff(trade_id: int, price: float):
 
 
 @app.get("/reset")
-def reset():
+def reset(user: str = Depends(authenticate)):
     c = conn()
     c.execute("DELETE FROM trades")
     c.execute("DELETE FROM alerts")
@@ -242,7 +266,10 @@ def reset():
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(strategy_filter: str = "ALL"):
+def dashboard(
+    strategy_filter: str = "ALL",
+    user: str = Depends(authenticate)
+):
     selected_strategy = strategy_filter.upper()
 
     c = conn()
@@ -365,16 +392,14 @@ def dashboard(strategy_filter: str = "ALL"):
     return f"""
     <html>
     <head>
-        <title>bot</title>
+        <title>Equity + Option Paper Algo</title>
         <style>
             body {{
                 font-family: Arial;
                 background:#f4f6f8;
                 padding:20px;
             }}
-            h1 {{
-                color:#111;
-            }}
+            h1 {{ color:#111; }}
             .topbar {{
                 display:flex;
                 gap:10px;
@@ -391,9 +416,7 @@ def dashboard(strategy_filter: str = "ALL"):
                 border:none;
                 cursor:pointer;
             }}
-            .danger {{
-                background:#c0392b;
-            }}
+            .danger {{ background:#c0392b; }}
             .cards {{
                 display:flex;
                 gap:15px;
@@ -428,9 +451,7 @@ def dashboard(strategy_filter: str = "ALL"):
                 border-radius:5px;
                 border:1px solid #aaa;
             }}
-            input {{
-                width:85px;
-            }}
+            input {{ width:85px; }}
             button {{
                 padding:8px 12px;
                 background:#111;
