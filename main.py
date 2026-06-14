@@ -12,6 +12,7 @@ import io
 import json
 import os
 from kotak_client import KotakClient
+import requests
 app = FastAPI()
 DB = "trades.db"
 
@@ -139,9 +140,76 @@ def init_db():
 
     c.commit()
     c.close()
+    oi_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+    oi_data = []
+
+    for sym in oi_symbols:
+        oi_data.append(fetch_nse_oi(sym))
 
 
 init_db()
+    def fetch_nse_oi(symbol="NIFTY"):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        }
+
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+
+        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        data = session.get(url, headers=headers, timeout=10).json()
+
+        records = data["records"]["data"]
+
+        ce_total = 0
+        pe_total = 0
+        max_ce = 0
+        max_pe = 0
+        max_ce_strike = 0
+        max_pe_strike = 0
+
+        for item in records:
+            strike = item.get("strikePrice", 0)
+
+            if "CE" in item:
+                ce_oi = item["CE"].get("openInterest", 0)
+                ce_total += ce_oi
+                if ce_oi > max_ce:
+                    max_ce = ce_oi
+                    max_ce_strike = strike
+
+            if "PE" in item:
+                pe_oi = item["PE"].get("openInterest", 0)
+                pe_total += pe_oi
+                if pe_oi > max_pe:
+                    max_pe = pe_oi
+                    max_pe_strike = strike
+
+        pcr = round(pe_total / ce_total, 2) if ce_total else 0
+
+        sentiment = "NEUTRAL"
+        if pcr > 1.1:
+            sentiment = "BULLISH"
+        elif pcr < 0.9:
+            sentiment = "BEARISH"
+
+        return {
+            "symbol": symbol,
+            "ce_total": ce_total,
+            "pe_total": pe_total,
+            "pcr": pcr,
+            "max_ce": max_ce_strike,
+            "max_pe": max_pe_strike,
+            "sentiment": sentiment
+        }
+
+    except Exception as e:
+        return {
+            "symbol": symbol,
+            "error": str(e)
+        }
 
 
 # ================= BROKER PAYLOAD =================
@@ -554,6 +622,32 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <td>{b['status']}</td>
         </tr>
         """
+        oi_rows = ""
+
+for oi in oi_data:
+
+    if "error" in oi:
+
+        oi_rows += f"""
+        <tr>
+            <td>{oi['symbol']}</td>
+            <td colspan="6">{oi['error']}</td>
+        </tr>
+        """
+
+    else:
+
+        oi_rows += f"""
+        <tr>
+            <td>{oi['symbol']}</td>
+            <td>{oi['ce_total']}</td>
+            <td>{oi['pe_total']}</td>
+            <td>{oi['pcr']}</td>
+            <td>{oi['max_ce']}</td>
+            <td>{oi['max_pe']}</td>
+            <td>{oi['sentiment']}</td>
+        </tr>
+        """
 
     return f"""
     <html>
@@ -603,7 +697,19 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
             <div class="card"><h3>Closed Trades</h3><h2>{total_trades}</h2></div>
             <div class="card"><h3>Win Rate</h3><h2>{winrate}%</h2></div>
         </div>
-
+        <h2>NSE OI Dashboard</h2>
+        <table>
+            <tr>
+                <th>Symbol</th>
+                <th>CE OI</th>
+                <th>PE OI</th>
+                <th>PCR</th>
+                <th>Max CE Strike</th>
+                <th>Max PE Strike</th>
+                <th>Sentiment</th>
+            </tr>
+            {oi_rows}
+        </table>
         <h2>Strategy Performance</h2>
         <div class="cards">{strategy_cards}</div>
 
