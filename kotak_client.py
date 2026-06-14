@@ -11,14 +11,7 @@ class KotakClient:
         self.totp = os.getenv("KOTAK_TOTP")
 
     def login(self):
-        return {
-            "status": "LOGIN_PLACEHOLDER",
-            "message": "Credentials loaded. Real login not enabled yet."
-        }
+        return {"status": "LOGIN_PLACEHOLDER", "message": "Credentials loaded. Real login not enabled yet."}
 
     def place_order(self, payload: dict):
-        return {
-            "status": "LIVE_PLACEHOLDER_NOT_SENT",
-            "message": "Order not sent to Kotak yet",
-            "payload": payload
-        }
+        return {"status": "LIVE_PLACEHOLDER_NOT_SENT", "message": "Order not sent to Kotak yet", "payload": payload}
