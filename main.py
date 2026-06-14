@@ -194,7 +194,7 @@ def fetch_nse_oi(symbol="NIFTY"):
 
 
 def fetch_all_nse_oi():
-    oi_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+    oi_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
     return [fetch_nse_oi(sym) for sym in oi_symbols]
 
 
