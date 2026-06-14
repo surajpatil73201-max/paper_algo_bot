@@ -238,7 +238,7 @@ def dashboard(strategy_filter: str = "ALL", user: str = Depends(authenticate)):
 
 @app.get("/oi", response_class=HTMLResponse)
 def oi_page(user: str = Depends(authenticate)):
-    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFY"]
     rows = ""
     for sym in symbols:
         oi = fetch_nse_oi(sym)
