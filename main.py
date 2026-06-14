@@ -148,7 +148,7 @@ def init_db():
 
 
 init_db()
-    def fetch_nse_oi(symbol="NIFTY"):
+def fetch_nse_oi(symbol="NIFTY"):
     try:
         headers = {
             "User-Agent": "Mozilla/5.0",
