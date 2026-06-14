@@ -140,12 +140,7 @@ def init_db():
 
     c.commit()
     c.close()
-    oi_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
-    oi_data = []
-
-    for sym in oi_symbols:
-        oi_data.append(fetch_nse_oi(sym))
-
+   
 
 init_db()
 def fetch_nse_oi(symbol="NIFTY"):
