@@ -644,7 +644,7 @@ for oi in oi_data:
         </tr>
         """
 
-    return f"""
+        return f"""
     <html>
     <head>
         <title>Algo Dashboard</title>
